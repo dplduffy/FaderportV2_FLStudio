@@ -16,7 +16,10 @@ import midi
 import utils
 
 ENC_MODE = 0
+SHIFT_MOMENTARY = False
+SHIFT_ON = False
 PREV_NEXT_MODE = 0
+MASTER_MODE = False
 IDLE_COUNT = 0
 PULSE_VAL = 0
 
@@ -28,9 +31,11 @@ class TFaderportV2:
 		self.STATUS = self.STATUS()
 		self.ENC = self.ENC()
 		self.PN = self.PN()
-		self.UpdateEncMode(2)
+		self.WINDOW = self.WINDOW()
+		global ENC_MODE
+		ENC_MODE = self.ENC.PAN
 		global PREV_NEXT_MODE
-		PREV_NEXT_MODE = 0
+		PREV_NEXT_MODE = self.PN.MIXER
 		self.OnRefresh(0)
 
 	def OnDeInit(self):
@@ -40,158 +45,117 @@ class TFaderportV2:
 
 		print("On Midi In")
 		print("Status: ", event.status, "Data1: ", event.data1, "Data2: ", event.data2)
-		event.handled = False
+		
+		global ENC_MODE
+		global SHIFT_MOMENTARY
+		global MASTER_MODE
+		event.handled = True
 
-		i = mixer.trackNumber()
+		i = 0 if MASTER_MODE else mixer.trackNumber()
 
 		if event.status == self.STATUS.FADER:
-			intVol = self.scaleValue(event.data2, 127, 1)
+			intVol = self.scaleValue(event.data2, 127, (2 if ENC_MODE == self.ENC.FLIP else 1))
 			fracVol = self.scaleValue(event.data1, 127, 1)/100
 			sVol = intVol + fracVol
-			mixer.setTrackVolume(i, sVol)
-			event.handled = True
+			if ENC_MODE == self.ENC.FLIP: mixer.setTrackPan(i, sVol-1)
+			else: mixer.setTrackVolume(i, sVol)
 
 		elif event.status == self.STATUS.KNOB:
-			if ENC_MODE == self.ENC.LINK:
-				event.handled = True
-			elif ENC_MODE == self.ENC.PAN:
-				if event.data2 > 64: 
-					sPan = mixer.getTrackPan(i) + ((64 - event.data2)/100)
-				else:
-					sPan = mixer.getTrackPan(i) + (event.data2/100)
+
+			#if ENC_MODE == self.ENC.LINK:
+			if ENC_MODE == self.ENC.PAN:
+				sPan = (mixer.getTrackPan(i) + ((64 - event.data2)/100)) if (event.data2 > 64) else (mixer.getTrackPan(i) + (event.data2/100))
 				mixer.setTrackPan(i, sPan)
-				event.handled = True
 			elif ENC_MODE == self.ENC.CHANNEL:
-				if event.data2 > 64:
-					self.Previous()
-				else:
-					self.Next()
-				event.handled = True
-			elif ENC_MODE == self.ENC.SCROLL:
-				event.handled = True
+				jump = 2
+				k = math.ceil((event.data2-64)/jump) if event.data2 > 64 else math.ceil((event.data2)/jump)
+				for x in range(k):
+					self.Previous() if event.data2 > 64 else self.Next()
+			#elif ENC_MODE == self.ENC.SCROLL:
+			elif ENC_MODE == self.ENC.FLIP:
+				sVol = (mixer.getTrackVolume(i) + ((64 - event.data2)/100)) if (event.data2 > 64) else (mixer.getTrackVolume(i) + (event.data2/100))
+				mixer.setTrackVolume(i, sVol)
 
-		elif (event.status == self.STATUS.BTN) & (event.controlVal == 127):
+		elif (event.status == self.STATUS.BTN):
 			
-			if (event.controlNum == self.BTN.PREV_UNDO):
-				self.Previous()
-				event.handled = True
+			if (event.controlNum == self.BTN.SHIFT):
+				
+				SHIFT_MOMENTARY = True if event.controlVal == 127 else False
+				self.UpdateLEDs(self.BTN.SHIFT, (127 if (SHIFT_MOMENTARY or ENC_MODE > 4) else 0))
+				ENC_MODE = (ENC_MODE - 4) if (event.controlVal == 127 and ENC_MODE > 4) else ENC_MODE
 
-			if (event.controlNum == self.BTN.NEXT_REDO):
-				self.Next()
-				event.handled = True
+			if (event.controlVal == 127):
 
-			if (event.controlNum == self.BTN.CLICK_F2):
-				transport.globalTransport(midi.FPT_Metronome,1)
-				event.handled = True
+				if (event.controlNum == self.BTN.KNOB):
+					if ENC_MODE == self.ENC.FLIP: mixer.setTrackVolume(i, 0.8)
+					else: mixer.setTrackPan(i, 0)
+				elif (event.controlNum == self.BTN.PREV_UNDO):
+					if SHIFT_MOMENTARY: general.undoUp()
+					else: self.Previous()
+				elif (event.controlNum == self.BTN.NEXT_REDO):
+					if SHIFT_MOMENTARY: general.undoDown()
+					else: self.Next()
+				elif (event.controlNum == self.BTN.LINK_LOCK):		ENC_MODE = self.ENC.LI_LOCK if SHIFT_MOMENTARY else self.ENC.LINK
+				elif (event.controlNum == self.BTN.PAN_FLIP):		ENC_MODE = self.ENC.FLIP if SHIFT_MOMENTARY else self.ENC.PAN
+				elif (event.controlNum == self.BTN.CHANNEL_LOCK):	ENC_MODE = self.ENC.CH_LOCK if SHIFT_MOMENTARY else self.ENC.CHANNEL
+				elif (event.controlNum == self.BTN.SCROLL_ZOOM):	ENC_MODE = self.ENC.ZOOM if SHIFT_MOMENTARY else self.ENC.SCROLL
+				elif (event.controlNum == self.BTN.MASTER_F1):
+					if SHIFT_MOMENTARY: transport.globalTransport(midi.FPT_F9,1)
+					else: MASTER_MODE = MASTER_MODE ^ True
+				elif (event.controlNum == self.BTN.CLICK_F2):
+					if SHIFT_MOMENTARY: transport.globalTransport(midi.FPT_F6,1)
+					else: transport.globalTransport(midi.FPT_Metronome,1)
+				
+				elif (event.controlNum == self.BTN.PLAY): 			transport.start()
+				elif (event.controlNum == self.BTN.STOP):			transport.stop()
+				elif (event.controlNum == self.BTN.RECORD):			transport.record()
+				elif (event.controlNum == self.BTN.LOOPMODE):		transport.setLoopMode()
+				elif (event.controlNum == self.BTN.MUTE_CLEAR):		mixer.muteTrack(i)
+				elif (event.controlNum == self.BTN.SOLO_CLEAR):		mixer.soloTrack(i)
+				elif (event.controlNum == self.BTN.ARM_ALL):		mixer.armTrack(i)
 
-			if (event.controlNum == self.BTN.PLAY):
-				transport.start()
-				event.handled = True
+		self.OnRefresh(0)
+		#elif (event.status == self.STATUS.BTN) & (event.controlVal == 0):
 
-			if (event.controlNum == self.BTN.STOP):
-				transport.stop()
-				event.handled = True
-
-			if (event.controlNum == self.BTN.RECORD):
-				transport.record()
-				event.handled = True
-
-			if (event.controlNum == self.BTN.LOOPMODE):
-				transport.setLoopMode()
-				event.handled = True
-
-			if (event.controlNum == self.BTN.MUTE_CLEAR):
-				mixer.enableTrack(i)
-				event.handled = True
-
-			if (event.controlNum == self.BTN.SOLO_CLEAR):
-				mixer.soloTrack(i)
-				event.handled = True
-
-			if (event.controlNum == self.BTN.ARM_ALL):
-				mixer.armTrack(i)
-				event.handled = True
-			
-			if (event.controlNum == self.BTN.LINK_LOCK):
-				self.UpdateEncMode(1)
-				event.handled = True
-
-			if (event.controlNum == self.BTN.PAN_FLIP):
-				self.UpdateEncMode(2)
-				event.handled = True
-
-			if (event.controlNum == self.BTN.CHANNEL_LOCK):
-				self.UpdateEncMode(3)
-				event.handled = True
-
-			if (event.controlNum == self.BTN.SCROLL_ZOOM):
-				self.UpdateEncMode(4)
-				event.handled = True
-
-			if (event.controlNum == self.BTN.KNOB):
-				mixer.setTrackPan(i, 0)
-				event.handled = True
-
-		elif (event.status == self.STATUS.BTN) & (event.controlVal == 0):
-			event.handled = True
+		
 
 	def OnRefresh(self, flags):
 
 		if device.isAssigned():
 			print("On Refresh")
 
-			i = mixer.trackNumber()
+			global PREV_NEXT_MODE
+
+			i = 0 if MASTER_MODE else mixer.trackNumber()
 
 			Volume = mixer.getTrackVolume(i)
-			sVol = math.modf(self.scaleValue(Volume, 1, 127))
+			Pan = mixer.getTrackPan(i) + 1
+			
+			sVol = math.modf(self.scaleValue((Pan if ENC_MODE == self.ENC.FLIP else Volume), (2 if ENC_MODE == self.ENC.FLIP else 1), 127))
 			fracVol = round(self.scaleValue(sVol[0], 1, 127))
 			intVol = round(sVol[1])
 			self.UpdateFader(fracVol, intVol)
 
-			Pan = (mixer.getTrackPan(i))
-
-			if mixer.isTrackSolo(i):
-				self.UpdateLEDs(self.BTN.SOLO_CLEAR, 127)
-			else:
-				self.UpdateLEDs(self.BTN.SOLO_CLEAR, 0)
-
-			if mixer.isTrackEnabled(i):
-				self.UpdateLEDs(self.BTN.MUTE_CLEAR, 0)
-			else:
-				self.UpdateLEDs(self.BTN.MUTE_CLEAR, 127)
-
-			if mixer.isTrackArmed(i):
-				self.UpdateLEDs(self.BTN.ARM_ALL, 127)
-			else:
-				self.UpdateLEDs(self.BTN.ARM_ALL, 0)
-
-			if general.getUseMetronome():
-				self.UpdateLEDs(self.BTN.CLICK_F2, 127)
-			else:
-				self.UpdateLEDs(self.BTN.CLICK_F2, 0)
-
-			if transport.isPlaying():
-				self.UpdateLEDs(self.BTN.PLAY, 127)
-			else:
-				self.UpdateLEDs(self.BTN.PLAY, 0)
-
-			if transport.isRecording():
-				self.UpdateLEDs(self.BTN.RECORD, 127)
-			else:
-				self.UpdateLEDs(self.BTN.RECORD, 0)
+			self.UpdateLEDs(self.BTN.SOLO_CLEAR, (127 if mixer.isTrackSolo(i) else 0))
+			self.UpdateLEDs(self.BTN.MUTE_CLEAR, (0 if mixer.isTrackEnabled(i) else 127))
+			self.UpdateLEDs(self.BTN.ARM_ALL, (127 if mixer.isTrackArmed(i) else 0))
+			self.UpdateLEDs(self.BTN.MASTER_F1, (127 if MASTER_MODE else 0))
+			self.UpdateLEDs(self.BTN.CLICK_F2, (127 if general.getUseMetronome() else 0))
+			self.UpdateLEDs(self.BTN.PLAY, (127 if transport.isPlaying() else 0))
+			self.UpdateLEDs(self.BTN.RECORD, (127 if transport.isRecording() else 0))
+			self.UpdateLEDs(self.BTN.LOOPMODE, (0 if transport.getLoopMode() else 127))
 			
-			if transport.getLoopMode():
-				self.UpdateLEDs(self.BTN.LOOPMODE, 0)
-			else:
-				self.UpdateLEDs(self.BTN.LOOPMODE, 127)
+			LED_OUT = 127 #PULSE_VAL if (ENC_MODE > 4) else 127 # not sure about blinking stuff
+
+			self.UpdateLEDs(self.BTN.SHIFT, 127 if (ENC_MODE > 4 or SHIFT_MOMENTARY) else 0)
+			self.UpdateLEDs(self.BTN.LINK_LOCK, (LED_OUT if (ENC_MODE == self.ENC.LINK or ENC_MODE == self.ENC.LI_LOCK) else 0))
+			self.UpdateLEDs(self.BTN.PAN_FLIP, (LED_OUT if (ENC_MODE == self.ENC.PAN or ENC_MODE == self.ENC.FLIP) else 0))
+			self.UpdateLEDs(self.BTN.CHANNEL_LOCK, (LED_OUT if (ENC_MODE == self.ENC.CHANNEL or ENC_MODE == self.ENC.CH_LOCK) else 0))
+			self.UpdateLEDs(self.BTN.SCROLL_ZOOM, (LED_OUT if (ENC_MODE == self.ENC.SCROLL or ENC_MODE == self.ENC.ZOOM) else 0))
 			
-			self.UpdateEncMode(ENC_MODE)
 			
-			global PREV_NEXT_MODE
-			if ui.getFocused(0):
-				PREV_NEXT_MODE = 0
-			elif ui.getFocused(1):
-				PREV_NEXT_MODE = 1
+			if ui.getFocused(0): PREV_NEXT_MODE = self.PN.MIXER
+			elif ui.getFocused(1): PREV_NEXT_MODE = self.PN.CHANNEL
 
 	def OnUpdateBeatIndicator(self, value):
 
@@ -199,24 +163,15 @@ class TFaderportV2:
 
 	def OnIdle(self):
 
-		
 		global IDLE_COUNT
-		IDLE_COUNT = IDLE_COUNT + 1
-
 		global PULSE_VAL
-		if IDLE_COUNT == 1:
-			PULSE_VAL = 127
-			self.OnRefresh(0)
-		elif IDLE_COUNT == 13:
-			PULSE_VAL = 0
-			self.OnRefresh(0)
-		elif IDLE_COUNT > 24:
-			IDLE_COUNT = 0
-		
-		print("PULSE : ", PULSE_VAL)
-		
 
-
+		IDLE_COUNT = IDLE_COUNT + 1 if IDLE_COUNT < 24 else 0
+		PULSE_VAL = 127 if IDLE_COUNT < 13 else 0
+		
+		#if (ENC_MODE > 4 and (IDLE_COUNT == 1 or IDLE_COUNT == 14)): self.OnRefresh(0)
+		
+		
 	def scaleValue(self, value, scaleIn, scaleOut):
 		return ((value/scaleIn) * scaleOut)
 
@@ -225,40 +180,21 @@ class TFaderportV2:
 
 	def UpdateLEDs(self, Index, Value):
 		device.midiOutMsg(self.STATUS.BTN + (Index << 8) + (Value << 16))
-
-	def UpdateEncMode(self, mode):
-		global ENC_MODE
-		ENC_MODE = mode
-
-		self.UpdateLEDs(self.BTN.LINK_LOCK, 0)
-		self.UpdateLEDs(self.BTN.PAN_FLIP, 0)
-		self.UpdateLEDs(self.BTN.CHANNEL_LOCK, 0)
-		self.UpdateLEDs(self.BTN.SCROLL_ZOOM, 0)
-
-		if mode == self.ENC.LINK:
-			self.UpdateLEDs(self.BTN.LINK_LOCK, PULSE_VAL)
-		elif mode == self.ENC.PAN:
-			self.UpdateLEDs(self.BTN.PAN_FLIP, PULSE_VAL)
-		elif mode == self.ENC.CHANNEL:
-			self.UpdateLEDs(self.BTN.CHANNEL_LOCK, PULSE_VAL)
-		elif mode == self.ENC.SCROLL:
-			self.UpdateLEDs(self.BTN.SCROLL_ZOOM, PULSE_VAL)
 	
 	def Next(self):
-		if PREV_NEXT_MODE == self.PN.MIXER:
-			mixer.setTrackNumber(mixer.trackNumber() + 1)
-		elif PREV_NEXT_MODE == self.PN.CHANNEL:
-			channels.selectOneChannel(channels.channelNumber() + 1)
-		else:
-			transport.globalTransport(midi.FPT_Next,1)
+		print(mixer.trackNumber()+1)
+		if PREV_NEXT_MODE == self.PN.MIXER: 
+			mixer.setTrackNumber(mixer.trackNumber() + 1 if mixer.trackNumber() < 126 else 0)
+			#no worky in 20.8.4 ui.scrollWindow(self.WINDOW.MIXER,mixer.trackNumber())
+		elif PREV_NEXT_MODE == self.PN.CHANNEL: 
+			channels.selectOneChannel(channels.channelNumber() + 1 if (channels.channelNumber()+1) < channels.channelCount() else 0)
+		else: transport.globalTransport(midi.FPT_Next,1)
 	
 	def Previous(self):
-		if PREV_NEXT_MODE == self.PN.MIXER:
-			mixer.setTrackNumber(mixer.trackNumber() - 1) 
-		elif PREV_NEXT_MODE == self.PN.CHANNEL:
-			channels.selectOneChannel(channels.channelNumber() - 1)
-		else:
-			transport.globalTransport(midi.FPT_Previous,1)
+		print(mixer.trackNumber()-1)
+		if PREV_NEXT_MODE == self.PN.MIXER: mixer.setTrackNumber(mixer.trackNumber() - 1 if mixer.trackNumber() > 0 else 126) 
+		elif PREV_NEXT_MODE == self.PN.CHANNEL: channels.selectOneChannel(channels.channelNumber() - 1 if channels.channelNumber() > 0 else channels.channelCount()-1)
+		else: transport.globalTransport(midi.FPT_Previous,1)
 			
 
 	class BTN:
@@ -298,10 +234,19 @@ class TFaderportV2:
 		PAN = 		2
 		CHANNEL = 	3
 		SCROLL = 	4
+		LI_LOCK =	5
+		FLIP =		6
+		CH_LOCK = 	7
+		ZOOM = 		8
 
 	class PN:
 		MIXER = 	0
 		CHANNEL = 	1
+
+	class WINDOW:
+		MIXER = 	0
+		CHANNEL =	1
+		PLAYLIST =	2
 
 FaderportV2 = TFaderportV2()
 
@@ -319,9 +264,6 @@ def OnIdle():
 
 def OnRefresh(Flags):
 	FaderportV2.OnRefresh(Flags)
-
-def OnDoFullRefresh(Flags):
-	FaderportV2.OnDoFullRefresh(Flags)
 
 def OnUpdateBeatIndicator(value):
 	FaderportV2.OnUpdateBeatIndicator(value)
