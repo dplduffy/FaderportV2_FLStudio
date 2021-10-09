@@ -17,11 +17,26 @@ import utils
 
 ENC_MODE = 0
 SHIFT_MOMENTARY = False
+KNOB_MOMENTARY = False
 SHIFT_ON = False
 PREV_NEXT_MODE = 0
 MASTER_MODE = False
 IDLE_COUNT = 0
 PULSE_VAL = 0
+getPan = 0
+getVol = 0
+setPan = 0
+setVol = 0
+
+#TODO
+#channel rack volume and pan control
+#knob momentary functions
+#shift functions? if pressing the shift button it returns back though...
+#shift button stays lit
+#master doesn't light
+#fader doesn't set for channel
+#flip doesn't work with channel
+
 
 class TFaderportV2:
 
@@ -49,32 +64,80 @@ class TFaderportV2:
 		global ENC_MODE
 		global SHIFT_MOMENTARY
 		global MASTER_MODE
+		global KNOB_MOMENTARY
+		global getPan
+		global getVol
+		global setPan
+		global setVol
+
 		event.handled = True
 
-		i = 0 if MASTER_MODE else mixer.trackNumber()
-
+		if PREV_NEXT_MODE == self.PN.MIXER: ##todo this is terrible pt1
+			i = 0 if MASTER_MODE else mixer.trackNumber()
+			getPan = mixer.getTrackPan(i)
+			getVol = mixer.getTrackVolume(i)
+		elif PREV_NEXT_MODE == self.PN.CHANNEL:
+			i = channels.channelNumber()
+			getPan = channels.getChannelPan(i)
+			getVol = channels.getChannelVolume(i)
+		
+		print(PREV_NEXT_MODE)
+		setPan = getPan
+		setVol = getVol
+		
 		if event.status == self.STATUS.FADER:
 			intVol = self.scaleValue(event.data2, 127, (2 if ENC_MODE == self.ENC.FLIP else 1))
 			fracVol = self.scaleValue(event.data1, 127, 1)/100
 			sVol = intVol + fracVol
-			if ENC_MODE == self.ENC.FLIP: mixer.setTrackPan(i, sVol-1)
-			else: mixer.setTrackVolume(i, sVol)
+			if ENC_MODE == self.ENC.FLIP:
+				setPan = sVol-1
+				print('setpan:',setPan)
+			else:
+				setVol = sVol
+				print('setVol:',setVol)
+
 
 		elif event.status == self.STATUS.KNOB:
+			
+			knobVal = 64-event.data2 if event.data2 > 64 else event.data2
+			knobVal = knobVal * 4 if KNOB_MOMENTARY else knobVal
 
 			#if ENC_MODE == self.ENC.LINK:
 			if ENC_MODE == self.ENC.PAN:
-				sPan = (mixer.getTrackPan(i) + ((64 - event.data2)/100)) if (event.data2 > 64) else (mixer.getTrackPan(i) + (event.data2/100))
-				mixer.setTrackPan(i, sPan)
+				if SHIFT_MOMENTARY:
+					inc = 0.25
+					sPan = round((getPan) * 4)/4
+					rPan = sPan + inc if knobVal > 0 else sPan - inc
+					dPan = abs(rPan - getPan)
+					setPan = sPan if dPan > inc else rPan			
+				else:
+					setPan = getPan + (knobVal/100)
+		
 			elif ENC_MODE == self.ENC.CHANNEL:
-				jump = 2
-				k = math.ceil((event.data2-64)/jump) if event.data2 > 64 else math.ceil((event.data2)/jump)
+				jump = 4
+				k = math.ceil(abs(knobVal)/jump)
 				for x in range(k):
-					self.Previous() if event.data2 > 64 else self.Next()
-			#elif ENC_MODE == self.ENC.SCROLL:
+					self.Next() if knobVal > 0 else self.Previous()
+			elif ENC_MODE == self.ENC.SCROLL:
+				sPosAbsTicks = transport.getSongPos(midi.SONGLENGTH_ABSTICKS)
+				if SHIFT_MOMENTARY:
+					inc = 384
+					sPos = round(sPosAbsTicks/384) * 384 #TOTO MAKE THIS A FUNCTION
+					rPos = sPos + inc if knobVal > 0 else sPos - inc
+					dPos = abs(rPos - sPosAbsTicks)
+					transport.setSongPos(sPos if dPos > inc else rPos, midi.SONGLENGTH_ABSTICKS)
+				else:
+					knobVal = knobVal * 24
+					transport.setSongPos(sPosAbsTicks + knobVal, midi.SONGLENGTH_ABSTICKS)
 			elif ENC_MODE == self.ENC.FLIP:
-				sVol = (mixer.getTrackVolume(i) + ((64 - event.data2)/100)) if (event.data2 > 64) else (mixer.getTrackVolume(i) + (event.data2/100))
-				mixer.setTrackVolume(i, sVol)
+				if SHIFT_MOMENTARY:
+					inc = 0.2
+					sVol = round(getVol * 5)/5
+					rVol = round(sVol + inc,1) if knobVal > 0 else round(sVol - inc,1)
+					dVol = round(abs(rVol - getVol),2)
+					setVol = sVol if dVol > inc else rVol		
+				else:
+					setVol =  getVol + (knobVal/100)
 
 		elif (event.status == self.STATUS.BTN):
 			
@@ -82,21 +145,20 @@ class TFaderportV2:
 				
 				SHIFT_MOMENTARY = True if event.controlVal == 127 else False
 				self.UpdateLEDs(self.BTN.SHIFT, (127 if (SHIFT_MOMENTARY or ENC_MODE > 4) else 0))
-				ENC_MODE = (ENC_MODE - 4) if (event.controlVal == 127 and ENC_MODE > 4) else ENC_MODE
 
+			if (event.controlNum == self.BTN.KNOB):
+					KNOB_MOMENTARY = True if event.controlVal == 127 else False
+					
 			if (event.controlVal == 127):
 
-				if (event.controlNum == self.BTN.KNOB):
-					if ENC_MODE == self.ENC.FLIP: mixer.setTrackVolume(i, 0.8)
-					else: mixer.setTrackPan(i, 0)
-				elif (event.controlNum == self.BTN.PREV_UNDO):
+				if (event.controlNum == self.BTN.PREV_UNDO):
 					if SHIFT_MOMENTARY: general.undoUp()
 					else: self.Previous()
 				elif (event.controlNum == self.BTN.NEXT_REDO):
 					if SHIFT_MOMENTARY: general.undoDown()
 					else: self.Next()
 				elif (event.controlNum == self.BTN.LINK_LOCK):		ENC_MODE = self.ENC.LI_LOCK if SHIFT_MOMENTARY else self.ENC.LINK
-				elif (event.controlNum == self.BTN.PAN_FLIP):		ENC_MODE = self.ENC.FLIP if SHIFT_MOMENTARY else self.ENC.PAN
+				elif (event.controlNum == self.BTN.PAN_FLIP):		ENC_MODE = self.ENC.FLIP if (SHIFT_MOMENTARY and ENC_MODE == self.ENC.PAN) else self.ENC.PAN
 				elif (event.controlNum == self.BTN.CHANNEL_LOCK):	ENC_MODE = self.ENC.CH_LOCK if SHIFT_MOMENTARY else self.ENC.CHANNEL
 				elif (event.controlNum == self.BTN.SCROLL_ZOOM):	ENC_MODE = self.ENC.ZOOM if SHIFT_MOMENTARY else self.ENC.SCROLL
 				elif (event.controlNum == self.BTN.MASTER_F1):
@@ -114,10 +176,15 @@ class TFaderportV2:
 				elif (event.controlNum == self.BTN.SOLO_CLEAR):		mixer.soloTrack(i)
 				elif (event.controlNum == self.BTN.ARM_ALL):		mixer.armTrack(i)
 
+		if PREV_NEXT_MODE == self.PN.MIXER: #todo terrible pt2
+			mixer.setTrackPan(i, setPan)
+			mixer.setTrackVolume(i, setVol)
+		elif PREV_NEXT_MODE == self.PN.CHANNEL:
+			channels.setChannelPan(i, setPan)
+			channels.setChannelVolume(i, setVol)
+
 		self.OnRefresh(0)
 		#elif (event.status == self.STATUS.BTN) & (event.controlVal == 0):
-
-		
 
 	def OnRefresh(self, flags):
 
@@ -126,10 +193,21 @@ class TFaderportV2:
 
 			global PREV_NEXT_MODE
 
-			i = 0 if MASTER_MODE else mixer.trackNumber()
+			if PREV_NEXT_MODE == self.PN.MIXER: ##todo this is terrible pt3
+				i = 0 if MASTER_MODE else mixer.trackNumber() #START 
+				Pan = mixer.getTrackPan(i)
+				Volume = mixer.getTrackVolume(i)
+			elif PREV_NEXT_MODE == self.PN.CHANNEL:
+				i = channels.channelNumber()
+				Pan = channels.getChannelPan(i)
+				Volume = channels.getChannelVolume(i)
 
-			Volume = mixer.getTrackVolume(i)
-			Pan = mixer.getTrackPan(i) + 1
+			# if PREV_NEXT_MODE == self.PN.MIXER:
+			# 	Volume = mixer.getTrackVolume(i)
+			# 	Pan = mixer.getTrackPan(i) + 1
+			# elif PREV_NEXT_MODE == self.PN.CHANNEL:
+			# 	Volume = channels.getChannelVolume(i)
+			# 	Pan = channels.getChannelPan(i) + 1
 			
 			sVol = math.modf(self.scaleValue((Pan if ENC_MODE == self.ENC.FLIP else Volume), (2 if ENC_MODE == self.ENC.FLIP else 1), 127))
 			fracVol = round(self.scaleValue(sVol[0], 1, 127))
