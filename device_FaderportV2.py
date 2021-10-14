@@ -21,18 +21,20 @@ KNOB_MOMENTARY = False
 SHIFT_ON = False
 PN_MODE = 0
 MASTER_MODE = False
+LOCK_MODE = False
 IDLE_COUNT = 0
+TEMP_COUNT = 0
 PULSE_VAL = 0
+LOCK_INDEX = -1
+HINT_MSG = "nothing"
+PREV_HINT_MSG = "nothing"
 
 #TODO
-#channel rack volume and pan control
-#knob momentary functions
-#shift functions? if pressing the shift button it returns back though...
-#shift button stays lit
-#master doesn't light
-#fader doesn't set for channel
-#flip doesn't work with channel
-
+#change Prev() next() to ui.scrollWindow when version 13 comes out
+#channel rack mute solo
+#fast forward / rewind buttons
+#make knob handler funciton. if inc > 0 -> round(val / inc) * inc else round(val * (1))//inc(1/inc)
+#remote link setup stuff
 
 class TFaderportV2:
 
@@ -56,11 +58,11 @@ class TFaderportV2:
 		print("On Midi In")
 		print("Status: ", event.status, "Data1: ", event.data1, "Data2: ", event.data2)
 		
-		global ENC_MODE, SHIFT_MOMENTARY, MASTER_MODE, KNOB_MOMENTARY
+		global ENC_MODE, SHIFT_MOMENTARY, MASTER_MODE, LOCK_MODE, KNOB_MOMENTARY, HINT_MSG, PREV_HINT_MSG, LOCK_INDEX
 
 		event.handled = True
 				
-		getVol, getPan, curIndex = self.getVolPan()
+		getVol, getPan, curIndex = self.getVolPan(LOCK_INDEX)
 		setVol = getVol
 		setPan = getPan
 		
@@ -76,15 +78,44 @@ class TFaderportV2:
 		elif event.status == self.STATUS.KNOB:
 			
 			knobVal = 64-event.data2 if event.data2 > 64 else event.data2
+			print('eventdata2 ', event.data2)
 			knobVal = knobVal * 4 if KNOB_MOMENTARY else knobVal
 
+			if ENC_MODE == self.ENC.LINK:
+				event.handled = False
+				controlId = 7
+				eventID = device.findEventID(midi.EncodeRemoteControlID(device.getPortNumber(), 0, 0) + controlId, 1)
+				value = device.getLinkedValue(eventID)
+				print('value : ',value)
+				sVal = round(self.scaleValue(value, 1, 127))
+				print('sval ',sVal)
+				if SHIFT_MOMENTARY:
+					increment = 16	
+					r1Val = round(sVal/increment)*increment
+					r2Val = r1Val + increment if knobVal > 0 else r1Val - increment
+					dVal = abs(r2Val - sVal)
+					tempData2 = r1Val if dVal > increment else r2Val			
+				else:
+					tempData2 = sVal + knobVal
+				print('knonbval ',knobVal)
+				print('tempdata2 ',tempData2)
+				if tempData2 < 0:
+					event.data2 = 0
+				elif tempData2 > 127:
+					event.data2 = 127
+				else:
+					event.data2 = tempData2
+				
+				event.data1 = controlId
+				device.processMIDICC(event)
+				#print("Status: ", event.status, "Data1: ", event.data1, "Data2: ", event.data2)
 			if ENC_MODE == self.ENC.PAN:
 				if SHIFT_MOMENTARY:
 					increment = 0.25
 					scaledPan = round((getPan) * 4)/4
 					roundedPan = scaledPan + increment if knobVal > 0 else scaledPan - increment
 					deltaPan = abs(roundedPan - getPan)
-					setPan = roundedPan if deltaPan > increment else roundedPan			
+					setPan = scaledPan if deltaPan > increment else roundedPan			
 				else:
 					setPan = getPan + (knobVal/100)
 
@@ -92,7 +123,7 @@ class TFaderportV2:
 				jump = 4
 				k = math.ceil(abs(knobVal)/jump)
 				for x in range(k):
-					self.Next() if knobVal > 0 else self.Previous()
+					self.Next() if knobVal > 0 else self.Previous() 
 
 			elif ENC_MODE == self.ENC.SCROLL:
 				sPosAbsTicks = transport.getSongPos(midi.SONGLENGTH_ABSTICKS)
@@ -116,7 +147,14 @@ class TFaderportV2:
 					setVol = sVol if dVol > inc else rVol		
 				else:
 					setVol =  getVol + (knobVal/100)
-
+			
+			elif ENC_MODE == self.ENC.ZOOM:
+				ui.setFocused(self.WINDOW.PLAYLIST)
+				if SHIFT_MOMENTARY:
+					ui.verZoom(knobVal)
+				else:
+					ui.horZoom(knobVal)
+				
 		elif (event.status == self.STATUS.BTN):
 			
 			if (event.controlNum == self.BTN.SHIFT):
@@ -136,7 +174,12 @@ class TFaderportV2:
 					if SHIFT_MOMENTARY: general.undoDown()
 					else: self.Next()
 				elif (event.controlNum == self.BTN.LINK_LOCK):
-					ENC_MODE = self.ENC.LI_LOCK if SHIFT_MOMENTARY else self.ENC.LINK
+					if SHIFT_MOMENTARY:
+						LOCK_MODE = LOCK_MODE ^ True
+						LOCK_INDEX = curIndex if LOCK_MODE else -1
+						HINT_MSG = str("Lock Mode ON" if LOCK_MODE else "Lock Mode OFF")				
+					else:
+						ENC_MODE = self.ENC.LINK
 				elif (event.controlNum == self.BTN.PAN_FLIP):
 					ENC_MODE = self.ENC.FLIP if (SHIFT_MOMENTARY and ENC_MODE == self.ENC.PAN) else self.ENC.PAN
 				elif (event.controlNum == self.BTN.CHANNEL_LOCK):
@@ -144,11 +187,22 @@ class TFaderportV2:
 				elif (event.controlNum == self.BTN.SCROLL_ZOOM):
 					ENC_MODE = self.ENC.ZOOM if SHIFT_MOMENTARY else self.ENC.SCROLL
 				elif (event.controlNum == self.BTN.MASTER_F1):
-					if SHIFT_MOMENTARY: transport.globalTransport(midi.FPT_F9,1)
-					else: MASTER_MODE = MASTER_MODE ^ True
+					if SHIFT_MOMENTARY: 
+						transport.globalTransport(midi.FPT_F9,1)
+					else: 
+						MASTER_MODE = MASTER_MODE ^ True
+						getVol, getPan, curIndex = self.getVolPan()
+						setVol = getVol
+						setPan = getPan
 				elif (event.controlNum == self.BTN.CLICK_F2):
 					if SHIFT_MOMENTARY: transport.globalTransport(midi.FPT_F6,1)
 					else: transport.globalTransport(midi.FPT_Metronome,1)
+				elif (event.controlNum == self.BTN.SECTION_F3):
+					if SHIFT_MOMENTARY: transport.globalTransport(midi.FPT_MarkerSelJog,1)
+					else: transport.globalTransport(midi.FPT_MarkerJumpJog,1)
+				elif (event.controlNum == self.BTN.MARKER_F4):
+					if SHIFT_MOMENTARY: transport.globalTransport(midi.FPT_F5,1)
+					else: transport.globalTransport(midi.FPT_AddMarker,1)
 				
 				elif (event.controlNum == self.BTN.PLAY): 			transport.start()
 				elif (event.controlNum == self.BTN.STOP):			transport.stop()
@@ -158,7 +212,8 @@ class TFaderportV2:
 				elif (event.controlNum == self.BTN.SOLO_CLEAR):		mixer.soloTrack(curIndex)
 				elif (event.controlNum == self.BTN.ARM_ALL):		mixer.armTrack(curIndex)
 
-		self.setVolPan(setVol, setPan, curIndex)
+		if (setVol != getVol) or (setPan != getPan):
+			self.setVolPan(setVol, setPan, curIndex)
 
 		self.OnRefresh(0)
 
@@ -167,9 +222,9 @@ class TFaderportV2:
 		if device.isAssigned():
 			print("On Refresh")
 
-			global PN_MODE
+			global PN_MODE, HINT_MSG, PREV_HINT_MSG, TEMP_COUNT, LOCK_INDEX
 
-			getVol, getPan, curIndex = self.getVolPan()
+			getVol, getPan, curIndex = self.getVolPan(LOCK_INDEX)
 			getPan = getPan + 1
 			
 			sVol = math.modf(self.scaleValue((getPan if ENC_MODE == self.ENC.FLIP else getVol), (2 if ENC_MODE == self.ENC.FLIP else 1), 127))
@@ -194,13 +249,17 @@ class TFaderportV2:
 			self.UpdateLEDs(self.BTN.CHANNEL_LOCK, (LED_OUT if (ENC_MODE == self.ENC.CHANNEL or ENC_MODE == self.ENC.CH_LOCK) else 0))
 			self.UpdateLEDs(self.BTN.SCROLL_ZOOM, (LED_OUT if (ENC_MODE == self.ENC.SCROLL or ENC_MODE == self.ENC.ZOOM) else 0))
 			
-			
-			if ui.getFocused(0): PN_MODE = self.PN.MIXER
-			elif ui.getFocused(1): PN_MODE = self.PN.CHANNEL
+			if not LOCK_MODE:
+				if ui.getFocused(0): PN_MODE = self.PN.MIXER 
+				elif ui.getFocused(1): PN_MODE = self.PN.CHANNEL
 
-	def OnUpdateBeatIndicator(self):
+			if (HINT_MSG != PREV_HINT_MSG):
+				ui.setHintMsg(HINT_MSG)
+				PREV_HINT_MSG = HINT_MSG
 
-		print("On Update Beat Indicator")
+	# def OnUpdateBeatIndicator(self):
+
+	# 	print("On Update Beat Indicator")
 
 	def OnIdle(self):
 
@@ -237,19 +296,21 @@ class TFaderportV2:
 		elif PN_MODE == self.PN.CHANNEL: channels.selectOneChannel(channels.channelNumber() - 1 if channels.channelNumber() > 0 else channels.channelCount()-1)
 		else: transport.globalTransport(midi.FPT_Previous,1)
 	
-	def getVolPan(self):
-		if PN_MODE == self.PN.MIXER:
-			i = 0 if MASTER_MODE else mixer.trackNumber()
+	def getVolPan(self, indexOverride):
+		if (PN_MODE == self.PN.MIXER) or MASTER_MODE:
+			if MASTER_MODE: i = 0
+			elif indexOverride >= 0: i = indexOverride
+			else: i = mixer.trackNumber()
 			pan = mixer.getTrackPan(i)
 			vol = mixer.getTrackVolume(i)
 		elif PN_MODE == self.PN.CHANNEL:
-			i = channels.channelNumber()
+			i = indexOverride if indexOverride > 0 else channels.channelNumber()
 			pan = channels.getChannelPan(i)
 			vol = channels.getChannelVolume(i)
 		return vol, pan, i
 	
 	def setVolPan(self, vol, pan, i):
-		if PN_MODE == self.PN.MIXER:
+		if (PN_MODE == self.PN.MIXER) or MASTER_MODE:
 			mixer.setTrackPan(i, pan)
 			mixer.setTrackVolume(i, vol)
 		elif PN_MODE == self.PN.CHANNEL:
@@ -324,5 +385,5 @@ def OnIdle():
 def OnRefresh(Flags):
 	FaderportV2.OnRefresh(Flags)
 
-def OnUpdateBeatIndicator(value):
-	FaderportV2.OnUpdateBeatIndicator(value)
+# def OnUpdateBeatIndicator(value):
+# 	FaderportV2.OnUpdateBeatIndicator(value)
