@@ -22,6 +22,7 @@ SHIFT_ON = False
 PN_MODE = 0
 MASTER_MODE = False
 LOCK_MODE = False
+FLIP_MODE = False
 IDLE_COUNT = 0
 TEMP_COUNT = 0
 PULSE_VAL = 0
@@ -33,8 +34,8 @@ PREV_HINT_MSG = "nothing"
 #change Prev() next() to ui.scrollWindow when version 13 comes out
 #channel rack mute solo
 #fast forward / rewind buttons
-#make knob handler funciton. if inc > 0 -> round(val / inc) * inc else round(val * (1))//inc(1/inc)
-#remote link setup stuff
+#test knob handler funciton. 
+#remote link setup stuff, needs to be a function for flip mode purposes
 
 class TFaderportV2:
 
@@ -58,121 +59,83 @@ class TFaderportV2:
 		print("On Midi In")
 		print("Status: ", event.status, "Data1: ", event.data1, "Data2: ", event.data2)
 		
-		global ENC_MODE, SHIFT_MOMENTARY, MASTER_MODE, LOCK_MODE, KNOB_MOMENTARY, HINT_MSG, PREV_HINT_MSG, LOCK_INDEX
+		global ENC_MODE, SHIFT_MOMENTARY, MASTER_MODE, LOCK_MODE, FLIP_MODE, KNOB_MOMENTARY, HINT_MSG, PREV_HINT_MSG, LOCK_INDEX
 
 		event.handled = True
-				
+		
 		getVol, getPan, curIndex = self.getVolPan(LOCK_INDEX)
 		setVol = getVol
 		setPan = getPan
 		
 		if event.status == self.STATUS.FADER:
-			intVol = self.scaleValue(event.data2, 127, (2 if ENC_MODE == self.ENC.FLIP else 1))
+			intVol = self.scaleValue(event.data2, 127, (2 if FLIP_MODE else 1))
 			fracVol = self.scaleValue(event.data1, 127, 1)/100
 			mVol = intVol + fracVol
-			if ENC_MODE == self.ENC.FLIP:
-				setPan = mVol-1
+			if FLIP_MODE:
+				if ENC_MODE == self.ENC.PAN:
+					setPan = mVol-1
+				elif ENC_MODE == self.ENC.LINK:
+					print('something something')
 			else:
 				setVol = mVol
 
 		elif event.status == self.STATUS.KNOB:
 			
 			knobVal = 64-event.data2 if event.data2 > 64 else event.data2
-			print('eventdata2 ', event.data2)
 			knobVal = knobVal * 4 if KNOB_MOMENTARY else knobVal
+			print('data2 : ', event.data2)
+			print('knobVal : ', knobVal)
 
 			if ENC_MODE == self.ENC.LINK:
 				event.handled = False
 				controlId = 7
 				eventID = device.findEventID(midi.EncodeRemoteControlID(device.getPortNumber(), 0, 0) + controlId, 1)
-				value = device.getLinkedValue(eventID)
-				print('value : ',value)
-				sVal = round(self.scaleValue(value, 1, 127))
-				print('sval ',sVal)
-				if SHIFT_MOMENTARY:
-					increment = 16	
-					r1Val = round(sVal/increment)*increment
-					r2Val = r1Val + increment if knobVal > 0 else r1Val - increment
-					dVal = abs(r2Val - sVal)
-					tempData2 = r1Val if dVal > increment else r2Val			
-				else:
-					tempData2 = sVal + knobVal
-				print('knonbval ',knobVal)
-				print('tempdata2 ',tempData2)
-				if tempData2 < 0:
-					event.data2 = 0
-				elif tempData2 > 127:
-					event.data2 = 127
-				else:
-					event.data2 = tempData2
-				
+				tempVal = device.getLinkedValue(eventID)
+				sVal = round(self.scaleValue(tempVal, 1, 127))
+				tempData2 = self.knobHandler(16, sVal, knobVal) if SHIFT_MOMENTARY else sVal + knobVal
 				event.data1 = controlId
+				event.data2 = self.constrainValue(tempData2, 0, 127) #test
 				device.processMIDICC(event)
 				#print("Status: ", event.status, "Data1: ", event.data1, "Data2: ", event.data2)
+
 			if ENC_MODE == self.ENC.PAN:
-				if SHIFT_MOMENTARY:
-					increment = 0.25
-					scaledPan = round((getPan) * 4)/4
-					roundedPan = scaledPan + increment if knobVal > 0 else scaledPan - increment
-					deltaPan = abs(roundedPan - getPan)
-					setPan = scaledPan if deltaPan > increment else roundedPan			
+				if FLIP_MODE:
+					setVol = (self.knobHandler(0.2, getVol, knobVal)) if SHIFT_MOMENTARY else (getVol + (knobVal/100))
 				else:
-					setPan = getPan + (knobVal/100)
+					setPan = self.knobHandler(0.25, getPan, knobVal) if SHIFT_MOMENTARY else getPan + (knobVal/100)
 
 			elif ENC_MODE == self.ENC.CHANNEL:
-				jump = 4
-				k = math.ceil(abs(knobVal)/jump)
+				inc = 4
+				k = math.ceil(abs(knobVal)/inc)
 				for x in range(k):
 					self.Next() if knobVal > 0 else self.Previous() 
 
 			elif ENC_MODE == self.ENC.SCROLL:
 				sPosAbsTicks = transport.getSongPos(midi.SONGLENGTH_ABSTICKS)
-				if SHIFT_MOMENTARY:
-					inc = 384
-					sPos = round(sPosAbsTicks/inc) * inc
-					rPos = sPos + inc if knobVal > 0 else sPos - inc
-					dPos = abs(rPos - sPosAbsTicks)
-					transport.setSongPos(sPos if dPos > inc else rPos, midi.SONGLENGTH_ABSTICKS)
-				else:
-					knobVal = knobVal * 24
-					transport.setSongPos(sPosAbsTicks + knobVal, midi.SONGLENGTH_ABSTICKS)
-
-			elif ENC_MODE == self.ENC.FLIP:
-				if SHIFT_MOMENTARY:
-					inc = 0.2
-					sVol = round(getVol * 5)/5
-					rVol = sVol + inc if knobVal > 0 else sVol - inc
-					rVol = round(rVol,1)
-					dVol = round(abs(rVol - getVol),2)
-					setVol = sVol if dVol > inc else rVol		
-				else:
-					setVol =  getVol + (knobVal/100)
-			
+				tempSongPos = (self.knobHandler(384, sPosAbsTicks, knobVal)) if SHIFT_MOMENTARY else (sPosAbsTicks + (knobVal * 24))
+				transport.setSongPos(tempSongPos, midi.SONGLENGTH_ABSTICKS)			
+				
 			elif ENC_MODE == self.ENC.ZOOM:
 				ui.setFocused(self.WINDOW.PLAYLIST)
-				if SHIFT_MOMENTARY:
-					ui.verZoom(knobVal)
-				else:
-					ui.horZoom(knobVal)
-				
+				ui.verZoom(knobVal) if SHIFT_MOMENTARY else ui.horZoom(knobVal)
+								
 		elif (event.status == self.STATUS.BTN):
 			
 			if (event.controlNum == self.BTN.SHIFT):
-				
 				SHIFT_MOMENTARY = True if event.controlVal == 127 else False
 				self.UpdateLEDs(self.BTN.SHIFT, (127 if (SHIFT_MOMENTARY or ENC_MODE > 4) else 0))
 
 			if (event.controlNum == self.BTN.KNOB):
-					KNOB_MOMENTARY = True if event.controlVal == 127 else False
+				KNOB_MOMENTARY = True if event.controlVal == 127 else False
 					
 			if (event.controlVal == 127):
 
 				if (event.controlNum == self.BTN.PREV_UNDO):
-					if SHIFT_MOMENTARY: general.undoUp()
-					else: self.Previous()
+					general.undoUp() if SHIFT_MOMENTARY else self.Previous()
+
 				elif (event.controlNum == self.BTN.NEXT_REDO):
-					if SHIFT_MOMENTARY: general.undoDown()
-					else: self.Next()
+					general.undoDone() if SHIFT_MOMENTARY else self.Next()
+					
 				elif (event.controlNum == self.BTN.LINK_LOCK):
 					if SHIFT_MOMENTARY:
 						LOCK_MODE = LOCK_MODE ^ True
@@ -180,12 +143,20 @@ class TFaderportV2:
 						HINT_MSG = str("Lock Mode ON" if LOCK_MODE else "Lock Mode OFF")				
 					else:
 						ENC_MODE = self.ENC.LINK
+
 				elif (event.controlNum == self.BTN.PAN_FLIP):
-					ENC_MODE = self.ENC.FLIP if (SHIFT_MOMENTARY and ENC_MODE == self.ENC.PAN) else self.ENC.PAN
+					if SHIFT_MOMENTARY:
+						FLIP_MODE = FLIP_MODE ^ True
+						HINT_MSG = str("Flip Mode ON" if FLIP_MODE else "Flip Mode OFF")
+					else:
+						ENC_MODE = self.ENC.PAN
+
 				elif (event.controlNum == self.BTN.CHANNEL_LOCK):
 					ENC_MODE = self.ENC.CH_LOCK if SHIFT_MOMENTARY else self.ENC.CHANNEL
+
 				elif (event.controlNum == self.BTN.SCROLL_ZOOM):
 					ENC_MODE = self.ENC.ZOOM if SHIFT_MOMENTARY else self.ENC.SCROLL
+
 				elif (event.controlNum == self.BTN.MASTER_F1):
 					if SHIFT_MOMENTARY: 
 						transport.globalTransport(midi.FPT_F9,1)
@@ -194,15 +165,13 @@ class TFaderportV2:
 						getVol, getPan, curIndex = self.getVolPan()
 						setVol = getVol
 						setPan = getPan
+
 				elif (event.controlNum == self.BTN.CLICK_F2):
-					if SHIFT_MOMENTARY: transport.globalTransport(midi.FPT_F6,1)
-					else: transport.globalTransport(midi.FPT_Metronome,1)
+					transport.globalTransport(midi.FPT_F6,1) if SHIFT_MOMENTARY else transport.globalTransport(midi.FPT_Metronome,1)
 				elif (event.controlNum == self.BTN.SECTION_F3):
-					if SHIFT_MOMENTARY: transport.globalTransport(midi.FPT_MarkerSelJog,1)
-					else: transport.globalTransport(midi.FPT_MarkerJumpJog,1)
+					transport.globalTransport(midi.FPT_MarkerSelJog,1) if SHIFT_MOMENTARY else transport.globalTransport(midi.FPT_MarkerJumpJog,1)
 				elif (event.controlNum == self.BTN.MARKER_F4):
-					if SHIFT_MOMENTARY: transport.globalTransport(midi.FPT_F5,1)
-					else: transport.globalTransport(midi.FPT_AddMarker,1)
+					transport.globalTransport(midi.FPT_F5,1) if SHIFT_MOMENTARY else transport.globalTransport(midi.FPT_AddMarker,1)
 				
 				elif (event.controlNum == self.BTN.PLAY): 			transport.start()
 				elif (event.controlNum == self.BTN.STOP):			transport.stop()
@@ -227,7 +196,7 @@ class TFaderportV2:
 			getVol, getPan, curIndex = self.getVolPan(LOCK_INDEX)
 			getPan = getPan + 1
 			
-			sVol = math.modf(self.scaleValue((getPan if ENC_MODE == self.ENC.FLIP else getVol), (2 if ENC_MODE == self.ENC.FLIP else 1), 127))
+			sVol = math.modf(self.scaleValue((getPan if FLIP_MODE else getVol), (2 if FLIP_MODE else 1), 127))
 			fracVol = round(self.scaleValue(sVol[0], 1, 127))
 			intVol = round(sVol[1])
 			self.UpdateFader(fracVol, intVol)
@@ -244,8 +213,8 @@ class TFaderportV2:
 			LED_OUT = 127 #PULSE_VAL if (ENC_MODE > 4) else 127 # not sure about blinking stuff
 
 			self.UpdateLEDs(self.BTN.SHIFT, 127 if (ENC_MODE > 4 or SHIFT_MOMENTARY) else 0)
-			self.UpdateLEDs(self.BTN.LINK_LOCK, (LED_OUT if (ENC_MODE == self.ENC.LINK or ENC_MODE == self.ENC.LI_LOCK) else 0))
-			self.UpdateLEDs(self.BTN.PAN_FLIP, (LED_OUT if (ENC_MODE == self.ENC.PAN or ENC_MODE == self.ENC.FLIP) else 0))
+			self.UpdateLEDs(self.BTN.LINK_LOCK, (LED_OUT if (ENC_MODE == self.ENC.LINK or LOCK_MODE) else 0))
+			self.UpdateLEDs(self.BTN.PAN_FLIP, (LED_OUT if (ENC_MODE == self.ENC.PAN or FLIP_MODE) else 0))
 			self.UpdateLEDs(self.BTN.CHANNEL_LOCK, (LED_OUT if (ENC_MODE == self.ENC.CHANNEL or ENC_MODE == self.ENC.CH_LOCK) else 0))
 			self.UpdateLEDs(self.BTN.SCROLL_ZOOM, (LED_OUT if (ENC_MODE == self.ENC.SCROLL or ENC_MODE == self.ENC.ZOOM) else 0))
 			
@@ -256,10 +225,6 @@ class TFaderportV2:
 			if (HINT_MSG != PREV_HINT_MSG):
 				ui.setHintMsg(HINT_MSG)
 				PREV_HINT_MSG = HINT_MSG
-
-	# def OnUpdateBeatIndicator(self):
-
-	# 	print("On Update Beat Indicator")
 
 	def OnIdle(self):
 
@@ -274,6 +239,11 @@ class TFaderportV2:
 		
 	def scaleValue(self, value, scaleIn, scaleOut):
 		return ((value/scaleIn) * scaleOut)
+	
+	def constrainValue(self, value, min, max):
+		if value < min: return min
+		elif value > max: return max
+		else: return value
 
 	def UpdateFader(self, Frac, Int):
 		device.midiOutMsg(self.STATUS.FADER + (Frac << 8) + (Int << 16))
@@ -317,6 +287,57 @@ class TFaderportV2:
 			channels.setChannelPan(i, pan)
 			channels.setChannelVolume(i, vol)
 
+	def knobHandler(self, increment, paramValue, knobValue):
+		quantizedValue = (round(paramValue/increment)*increment) if (increment > 0) else (round(paramValue * (1/increment))/(1/increment))
+		roundedValue = quantizedValue + increment if knobValue > 0 else quantizedValue - increment
+		roundedValue = round(roundedValue,1) #check if this rounding works
+		deltaValue = round(abs(roundedValue - paramValue),2) #check if this rounding works
+		return quantizedValue if deltaValue > increment else roundedValue
+				
+		#old code
+
+		#LINK
+		# if SHIFT_MOMENTARY:
+		# 	increment = 16	
+		# 	r1Val = round(sVal/increment)*increment
+		# 	r2Val = r1Val + increment if knobVal > 0 else r1Val - increment
+		# 	dVal = abs(r2Val - sVal)
+		# 	tempData2 = r1Val if dVal > increment else r2Val			
+		# else:
+		# 	tempData2 = sVal + knobVal
+
+		#PAN
+		# if SHIFT_MOMENTARY:
+		# 	increment = 0.25
+		# 	scaledPan = round((getPan) * 4)/4
+		# 	roundedPan = scaledPan + increment if knobVal > 0 else scaledPan - increment
+		# 	deltaPan = abs(roundedPan - getPan)
+		# 	setPan = scaledPan if deltaPan > increment else roundedPan			
+		# else:
+		# 	setPan = getPan + (knobVal/100)
+
+		#SCROLL
+		# if SHIFT_MOMENTARY:
+		# 	inc = 384
+		# 	sPos = round(sPosAbsTicks/inc) * inc
+		# 	rPos = sPos + inc if knobVal > 0 else sPos - inc
+		# 	dPos = abs(rPos - sPosAbsTicks)
+		# 	transport.setSongPos(sPos if dPos > inc else rPos, midi.SONGLENGTH_ABSTICKS)
+		# else:
+		# 	knobVal = knobVal * 24
+		# 	transport.setSongPos(sPosAbsTicks + knobVal, midi.SONGLENGTH_ABSTICKS)
+
+		#FLIP
+		# if SHIFT_MOMENTARY:
+		# 	inc = 0.2
+		# 	sVol = round(getVol * 5)/5
+		# 	rVol = sVol + inc if knobVal > 0 else sVol - inc
+		# 	rVol = round(rVol,1)
+		# 	dVol = round(abs(rVol - getVol),2)
+		# 	setVol = sVol if dVol > inc else rVol		
+		# else:
+		# 	setVol =  getVol + (knobVal/100)
+
 	class BTN:
 		SOLO_CLEAR = 	8
 		MUTE_CLEAR = 	16
@@ -354,8 +375,6 @@ class TFaderportV2:
 		PAN = 		2
 		CHANNEL = 	3
 		SCROLL = 	4
-		LI_LOCK =	5
-		FLIP =		6
 		CH_LOCK = 	7
 		ZOOM = 		8
 
@@ -384,6 +403,3 @@ def OnIdle():
 
 def OnRefresh(Flags):
 	FaderportV2.OnRefresh(Flags)
-
-# def OnUpdateBeatIndicator(value):
-# 	FaderportV2.OnUpdateBeatIndicator(value)
